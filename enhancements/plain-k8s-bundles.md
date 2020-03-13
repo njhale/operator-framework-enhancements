@@ -234,3 +234,10 @@ Upgrade (not supporting `k8s+v1` mediatype -> supporting `k8s+v1` mediatype)
 Downgrade (supporting `k8s+v1` mediatype -> not supporting `k8s+v1` mediatype)
 
 - OpenShift supports a downgrade path and so OLM must ensure that it can continue working even if the ability to install `k8s+v1` format is removed as OLM is downgraded to an older version. OLM should be able to reject bundle formats that it cannot successfully reconcile and emit a helpful error message in that case.
+
+### Drawbacks
+The enhancement adds a new bundle format that is more intuitive and flexible, making OLM easier to use. One drawback is that this new format departs from the established CSV interface OLM has always required and users are familiar with. However, OLM is looking to add flexibility to its bundle format and not requiring a CSV is seen as a benefit. Instead of another complex bundle format for OLM users to understand the k8s+v1 mediatype goes back to what users already use and understand - kubernetes objects.
+Another drawback is that with the CSV bundle format all installation details were explicitly laid out on the CSV including all the required, dependent, optional, and native APIs. In the k8s+v1 bundle format some details will need to be inferred based on metadata and the properties of the objects in the bundle themselves (see details in the Inferrable section). This inference step will need to be clearly documented for users to avoid possible confusion.
+
+### Alternatives
+The main value derived from this enhancement is allowing for more diverse bundle formats which ultimately make OLM easier to use. An alternative approach is to accept helm formatted bundles, as this is another popular and established format for packaging operators. Supporting helm bundles is also viewed as an important upcoming feature for OLM. This enhancement helps with supporting helm bundles because supporting k8s+v1 bundles involves manipulating the same objects that helm bundles will deliver. This enhancement can be seen as a step in the direction of supporting helm bundles.
