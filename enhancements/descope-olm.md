@@ -1,5 +1,5 @@
 ---
-title: simplify-olm-apis
+title: descope-olm
 authors:
   - "@njhale"
 reviewers:
@@ -8,13 +8,13 @@ reviewers:
 approvers:
   - TBD
 creation-date: 2019-09-05
-last-updated: 2019-10-02
+last-updated: 2020-11-12
 status: provisional
 see-also:
   - "http://bit.ly/rh-epic_simplify-olm-apis"
 ---
 
-# simplify-olm-apis
+# descope-olm
 
 ## Release Signoff Checklist
 
@@ -25,9 +25,27 @@ see-also:
 
 ## Summary
 
-This enhancement iterates on OLM APIs to reduce the number of resource types and provide a smaller surface by which to manage an operator's lifecycle. We propose adding a new cluster-scoped resource type to OLM that acts as a single entry point for the installation and management of an operator.
+Iterate on OLM APIs to do away with first-class tenancy features while simultaneously reducing the complexity of the APIs users must interact with to install and manage operators. We propose adding a new cluster-scoped resource type to OLM that acts as a single entry point for the installation and management of an operator.
 
 ## Motivation
+
+### Problems With Operator Scoping
+
+ When OLM was first written, CRDs defined only the existence of a single GVK in a cluster. Operators developed for OLM could only be installed in a single namespace, watching that namespace - this delivered on the self-service, operational-encoding story of operators. The same operator could be installed in every namespace of a cluster.
+
+Privilege escalation became a concern - since operators are run with a service account in a namespace, anyone with the ability to create workloads in that namespace could escalate to the permissions of the operator. This made service provider/consumer relationships a difficult sell for operators in OLM.
+
+At the same time, CRDs continued to evolve new features. With version schemas and admission and conversion webhooks, CRDs no longer simply registered a global name for a type, and operators in separate namespaces had lots of options to interfere with one another if they shared the same CRD. OLM also expanded to support APIServices in addition to operators based on CRDs, and so required a notion of cluster-wide operators.
+
+To address these concerns, a notion of scoping operators was introduced via the OperatorGroup object. An OperatorGroup would specify a set of namespaces within a cluster in which all operators installed would share the same scope. OLM would ensure that only one operator within a namespace owned a particular CRD to avoid collision problems, and more installation options were provided to allow separating operators from their managed workloads.
+
+Unforunately, time and usage made clear that OperatorGroups -- or any high-level tenancy concept implemented today -- do not alter the fundamental problem: that apis in a kubernetes cluster are cluster-scoped. They are visible via discovery to any user that wishes to see them. Even operators that agree on a particular GVK may have differences of opinion in how those objects should be admitted to a cluster, or how conversion between api versions should happen.
+
+With Operator Framework, we want to build an ecosystem of high-quality operators that can be re-used across different projects, whether they’re in the same cluster or not. But re-using operators compounds the scoping problems within a cluster - it increases the likelihood that more than one “opinion” about an API exists in the cluster.
+
+TODO(njhale): More on the componding problems caused by operator scoping wrt dependencies, management by OLM, and comprehensibility to users.
+
+### OLM v1 API Complexity
 
 Operator authors perceive OLM/Marketplace v1 APIs as difficult to use. This is thought to stem from three primary sources of complexity:
 
@@ -38,7 +56,7 @@ Operator authors perceive OLM/Marketplace v1 APIs as difficult to use. This is t
 
 Negative perceptions stunt community adoption and cause a loss of mindshare, while complexity impedes product stability and feature delivery. Reducing OLM's API surface will help to avert these scenarios by making direct interaction with OLM more straightforward. A simplified user experience will encourage operator development and testing.
 
-### Goals
+## Goals
 
 - Define an API resource that aggregates the complete state of an operator
 - Define a single API resource that allows an authorized user to:
@@ -49,30 +67,62 @@ Negative perceptions stunt community adoption and cause a loss of mindshare, whi
 - Remain backwards compatible with operators installed by previous versions of OLM
 - Retain all of OLM's current features
 
-### Non-Goals
+## Non-Goals
 
 - Define the implementation of an operator bundle
 - Describe how bundle images or indexes are pulled, unpacked, or queried
-- Deprecate `OperatorSource`
 - Customization/configuration of an operator
 
 ## Proposal
 
+Introduce a new cluster scoped API resource that represents the unpacked content of an operator bundle.
+
+At a high level, a `Bundle` spec will specify:
+
+- the location to pull a bundle from
+- a flag indicating whether the bundle's content should be applied to the cluster
+- a reference to a container image that implements [the bundle unpacker interface](#the-bundle-unpacker-interface)
+
+Its status will surface:
+
+- the set of [properties and constraints]() defined by the unpacked bundle
+- the mediatype of the unpacked bundle
+- top-level conditions that summarize any abnormal state
+
+```yaml
+apiVersion: porcelain.operators.coreos.com/v1alpha1
+kind: Bundle
+metadata:
+  name: my-operator
+  namespace: olm
+spec:
+  from:
+    type: Image
+    ref: quay.io/my/plumbus-package@sha256:123def...
+status:
+  mediaType: registry+v1
+  conditions:
+    type: UnpackFailed
+    status: True
+    reason: InvalidBundle
+    message: "no manifests detected in bundle"
+```
+
 Introduce a new cluster scoped API resource that represents an operator as a set of component resources selected with a unique label.
 
-At a High level, an `Operator` spec will specify:
+At a high level, an `Operator` spec will specify:
 
+- a set of [properties]() and [constraints]() to add to operator dependency resolution (optional)
 - a source operator bundle (optional)
 - a source package, channel, and bundle index (optional)
 - an update policy (optional)
 
 While its status will surface:
 
-- info about the operator, such its name, version, and the APIs it provides and requires
+- the set of effective properties and constraints used in dependency resolution
 - the label selector used to gather its components
 - a set of status enriched references to its components
 - top-level conditions that summarize any abnormal state
-- the bundle image or package, channel, bundle index its components were resolved from
 - the packages and channels within the referenced bundle index that contain updates for the operator
 
 An example of an `Operator`:
@@ -83,78 +133,82 @@ kind: Operator
 metadata:
   name: plumbus
 spec:
-  updates:
+  properties:
+  - type: olm.package
+    value:
+      name: quay.io/my/plumbus-package
+      version: "1.0.0"
+  - type: olm.channel
+    value:
+      name: "channel"
+  source:
     type: CatalogSource
     catalogSource:
-      package: plumbus
-      channel: stable
-      entrypoint: plumbus.v2.0.0
-      approval: Automatic
       ref:
         name: community
         namespace: my-ns
 
 status:
-  metadata:
-    displayName: Plumbus
-    description: Welcome to the exciting world of Plumbus ownership! A Plumbus will aid many things in life, making life easier. With proper maintenance, handling, storage, and urging, Plumbus will provide you with a lifetime of better living and happiness.
-    version: 2.0.0-alpha
-    apis:
-      provides:
-      - group: how.theydoit.com
-        version: v2alpha1
-        kind: Plumbus
-        plural: plumbai
-        singular: plumbus
-      requires:
-      - group: manufacturing.how.theydoit.com
-        version:
-        kind: Grumbo
-        plural: grumbos
-        singular: grumbo
-  
+  properties:
+  - type: olm.package
+    value:
+      packageName: plumbus
+      version: "1.0.0"
+  - type: olm.channel
+    value:
+      name: "channel"
+  - type: olm.gvk
+    value:
+      group: how.theydoit.com
+      version: v2alpha1
   updates:
     available:
     - name: community
       channel: beta
-
+      kind: Plumbus
   conditions:
   - kind: UpdateAvailable
     status: True
     reason: CrossChannelUpdateFound
     message: pivoting between versions
     lastTransitionTime: "2019-09-16T22:26:29Z"
-
   components:
    matchLabels:
       operators.coreos.com/plumbus: ""
    refs:
-    - kind: ClusterServiceVersion
-      namespace: operators
-      name: plumbus.v2.0.0-alpha
-      uid: d70a53b5-d06a-11e9-821f-9a2e3b9d8156
-      apiVersion: operators.coreos.com/v1alpha1
-      resourceVersion: 109811
-      conditions:
-      - type: Installing
-        status: True
-        reason: AllPreconditionsMet
-        message: deployment rolling out
-        lastTransitionTime: "2019-09-16T22:26:29Z"
-    - kind: CustomResourceDefinition
-      name: plumbai.how.dotheydoit.com
-      uid: d680c7f9-d06a-11e9-821f-9a2e3b9d8156
-      apiVersion: apiextensions.k8s.io/v1beta1
-      resourceVersion: 75396
-    - kind: ClusterRoleBinding
-      namespace: operators
-      name: rb-9oacj
-      uid: d81c24d6-d06a-11e9-821f-9a2e3b9d8156
-      apiVersion: rbac.authorization.k8s.io/v1
-      resourceVersion: 75438
+   - kind: Bundle
+     name: plumbus-def456
+     uid: d70a53b5-d06a-11e9-821f-9a2e3b9d8156
+     conditions:
+     - type: Applying
+       status: True
+       reason: ResourcesMissing
+       message: specified resources applying
+       lastTransitionTime: "2019-09-16T22:26:29Z"
+     apiVersion: operators.coreos.com/v1alpha1
+   - kind: ClusterServiceVersion
+     namespace: operators
+     name: plumbus.v2.0.0-alpha
+     uid: d70a53b5-d06a-11e9-821f-9a2e3b9d8156
+     apiVersion: operators.coreos.com/v1alpha1
+     conditions:
+     - type: Installing
+       status: True
+       reason: AllPreconditionsMet
+       message: deployment rolling out
+       lastTransitionTime: "2019-09-16T22:26:29Z"
+   - kind: CustomResourceDefinition
+     name: plumbai.how.dotheydoit.com
+     uid: d680c7f9-d06a-11e9-821f-9a2e3b9d8156
+     apiVersion: apiextensions.k8s.io/v1beta1
+   - kind: ClusterRoleBinding
+     namespace: operators
+     name: rb-9oacj
+     uid: d81c24d6-d06a-11e9-821f-9a2e3b9d8156
+     apiVersion: rbac.authorization.k8s.io/v1
 ```
 
-Introduce a new cluster-scoped API resource that will drive the installation of bundles resolved for an `Operator`:
+Introduce a new cluster scoped API resource that will drive the installation of bundles resolved for an `Operator`:
 
 An `Install` spec will specify:
 
@@ -178,10 +232,6 @@ kind: Install
 metadata:
   name: plumbus-plan
 spec:
- namespaces:
- - from: default
-   to: operators
-
  approval: Unapproved
 
  content: # must specify at least one thing to install
@@ -233,6 +283,8 @@ In order to drive this UX, when an `Install` resource is created, OLM will assoc
 
 ### User Stories
 
+<!-- TODO(njhale): add stories to illustrate that "descoping" doesn't mean operators can't scope at their level -->
+
 #### As a Cluster Admin responsible for configuring OLM, I want to
 
 - restrict the resources OLM will apply from a bundle image/index when installing an operator
@@ -253,12 +305,20 @@ In order to drive this UX, when an `Install` resource is created, OLM will assoc
 
 ### Implementation Details/Notes/Constraints
 
+#### The Bundle Unpacker Interface
+
+<!-- TODO(njhale) -->
+
 #### The `Operator` and `Install` Resources
 
 The cluster-scoped resources, `Operator` and `Install` will be added to the `v1` group version:
 
 - cluster scoped resources can be listed without granting namespace list, but do require a `ClusterRole`
 - namespace scoped resources can specify references to cluster scoped resources in their owner references, which lets us use garbage collection to clean up resources across mutliple namespaces; e.g. `RoleBindings` copied for an `OperatorGroup`
+
+#### Bundle Pivoting
+
+<!-- TODO(njhale) -->
 
 #### Component Selection
 
